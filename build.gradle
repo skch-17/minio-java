@@ -173,39 +173,23 @@ project(':api') {
 
     publishing {
         publications {
-            mavenJava(MavenPublication) {
-                artifactId archivesBaseName
+            library(MavenPublication) {
                 from components.java
-                pom {
-                    name = 'minio'
-                    packaging = 'jar'
-                    description = 'MinIO Java SDK for Amazon S3 Compatible Cloud Storage'
-                    url = 'https://github.com/minio/minio-java'
-                    inceptionYear = '2015'
-
-                    scm {
-                        connection = 'scm:git:git@github.com:minio/minio-java.git'
-                        developerConnection = 'scm:git:git@github.com:minio/minio-java.git'
-                        url = 'http://github.com/minio/minio-java'
-                    }
-
-                    licenses {
-                        license {
-                            name = 'The Apache License, Version 2.0'
-                            url = 'http://www.apache.org/licenses/LICENSE-2.0.txt'
-                        }
-                    }
-
-                    developers {
-                        developer {
-                            id = 'minio'
-                            name = 'MinIO Inc.'
-                            email = 'dev@min.io'
-                        }
-                    }
+            }
+        }
+        repositories {
+            maven {
+                url privatenMaven
+                credentials(HttpHeaderCredentials) {
+                    name = "Deploy-Token"
+                    value = gitLabPrivateToken
+                }
+                authentication {
+                    header(HttpHeaderAuthentication)
                 }
             }
         }
+
     }
 
     signing {
@@ -214,21 +198,6 @@ project(':api') {
         }
     }
 
-    nexusStaging {
-        packageGroup = group
-        stagingProfileId = '9b746c9f8abc1'
-        username = project.properties['nexusUsername']
-        password = project.properties['nexusPassword']
-    }
-
-    nexusPublishing {
-        repositories {
-            sonatype {
-                username = project.properties['nexusUsername']
-                password = project.properties['nexusPassword']
-            }
-        }
-    }
 }
 
 project(':adminapi') {
@@ -284,62 +253,9 @@ project(':adminapi') {
         archives javadocJar, sourcesJar, shadowJar
     }
 
-    publishing {
-        publications {
-            mavenJava(MavenPublication) {
-                artifactId archivesBaseName
-                from components.java
-                pom {
-                    name = 'minio'
-                    packaging = 'jar'
-                    description = 'MinIO Java SDK for Amazon S3 Compatible Cloud Storage'
-                    url = 'https://github.com/minio/minio-java'
-                    inceptionYear = '2015'
-
-                    scm {
-                        connection = 'scm:git:git@github.com:minio/minio-java.git'
-                        developerConnection = 'scm:git:git@github.com:minio/minio-java.git'
-                        url = 'http://github.com/minio/minio-java'
-                    }
-
-                    licenses {
-                        license {
-                            name = 'The Apache License, Version 2.0'
-                            url = 'http://www.apache.org/licenses/LICENSE-2.0.txt'
-                        }
-                    }
-
-                    developers {
-                        developer {
-                            id = 'minio'
-                            name = 'MinIO Inc.'
-                            email = 'dev@min.io'
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     signing {
         if (project.properties.containsKey('signing.keyId')) {
             sign publishing.publications.mavenJava
-        }
-    }
-
-    nexusStaging {
-        packageGroup = group
-        stagingProfileId = '9b746c9f8abc1'
-        username = project.properties['nexusUsername']
-        password = project.properties['nexusPassword']
-    }
-
-    nexusPublishing {
-        repositories {
-            sonatype {
-                username = project.properties['nexusUsername']
-                password = project.properties['nexusPassword']
-            }
         }
     }
 }

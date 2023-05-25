@@ -950,7 +950,8 @@ public class MinioAsyncClient extends S3Base {
             args.extraHeaders() == null ? null : httpHeaders(args.extraHeaders()),
             body,
             0,
-            creds);
+            creds,
+            args.getStartDate());
     url = Signer.presignV4(request, region, creds.accessKey(), creds.secretKey(), args.expiry());
     return url.toString();
   }

@@ -69,6 +69,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.InvalidKeyException;
 import java.security.KeyManagementException;
 import java.security.NoSuchAlgorithmException;
+import java.time.LocalDateTime;
 import java.time.ZonedDateTime;
 import java.util.Arrays;
 import java.util.Collections;
@@ -382,9 +383,10 @@ public abstract class S3Base {
     return builder.build();
   }
 
+
   /** Create HTTP request for given paramaters. */
   protected Request createRequest(
-      HttpUrl url, Method method, Headers headers, Object body, int length, Credentials creds)
+      HttpUrl url, Method method, Headers headers, Object body, int length, Credentials creds, ZonedDateTime date)
       throws InsufficientDataException, InternalException, IOException, NoSuchAlgorithmException {
     Request.Builder requestBuilder = new Request.Builder();
     requestBuilder.url(url);
@@ -427,7 +429,6 @@ public abstract class S3Base {
       requestBuilder.header("X-Amz-Security-Token", creds.sessionToken());
     }
 
-    ZonedDateTime date = ZonedDateTime.now();
     requestBuilder.header("x-amz-date", date.format(Time.AMZ_DATE_FORMAT));
 
     RequestBody requestBody = null;
@@ -493,7 +494,7 @@ public abstract class S3Base {
 
     HttpUrl url = buildUrl(method, bucketName, objectName, region, queryParamMap);
     Credentials creds = (provider == null) ? null : provider.fetch();
-    Request req = createRequest(url, method, headers, body, length, creds);
+    Request req = createRequest(url, method, headers, body, length, creds, ZonedDateTime.now());
     if (creds != null) {
       req =
           Signer.signV4S3(
