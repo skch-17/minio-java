@@ -16,7 +16,10 @@
 
 package io.minio;
 
+import io.minio.http.HttpUtils;
+import io.minio.org.apache.commons.validator.routines.InetAddressValidator;
 import java.util.Objects;
+import java.util.regex.Pattern;
 
 /** Base argument class holds bucket name and region. */
 public abstract class BucketArgs extends BaseArgs {
@@ -34,32 +37,39 @@ public abstract class BucketArgs extends BaseArgs {
   /** Base argument builder class for {@link BucketArgs}. */
   public abstract static class Builder<B extends Builder<B, A>, A extends BucketArgs>
       extends BaseArgs.Builder<B, A> {
+    private static final Pattern BUCKET_NAME_REGEX =
+        Pattern.compile("^[a-z0-9][a-z0-9\\.\\-]{1,61}[a-z0-9]$");
+    protected boolean skipValidation = false;
+
     protected void validateBucketName(String name) {
       validateNotNull(name, "bucket name");
+      if (skipValidation) {
+        return;
+      }
 
-      // Bucket names cannot be no less than 3 and no more than 63 characters long.
-      if (name.length() < 3 || name.length() > 63) {
+      if (!BUCKET_NAME_REGEX.matcher(name).find()) {
         throw new IllegalArgumentException(
-            name + " : " + "bucket name must be at least 3 and no more than 63 characters long");
+            "bucket name '"
+                + name
+                + "' does not follow Amazon S3 standards. For more information refer "
+                + "https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html");
       }
-      // Successive periods in bucket names are not allowed.
-      if (name.contains("..")) {
-        String msg =
-            "bucket name cannot contain successive periods. For more information refer "
-                + "http://docs.aws.amazon.com/AmazonS3/latest/dev/BucketRestrictions.html";
-        throw new IllegalArgumentException(name + " : " + msg);
+
+      if (InetAddressValidator.getInstance().isValidInet4Address(name)) {
+        throw new IllegalArgumentException(
+            "bucket name '" + name + "' must not be formatted as an IP address");
       }
-      // Bucket names should be dns compatible.
-      if (!name.matches("^[a-z0-9][a-z0-9\\.\\-]+[a-z0-9]$")) {
-        String msg =
-            "bucket name does not follow Amazon S3 standards. For more information refer "
-                + "http://docs.aws.amazon.com/AmazonS3/latest/dev/BucketRestrictions.html";
-        throw new IllegalArgumentException(name + " : " + msg);
+
+      if (name.contains("..") || name.contains(".-") || name.contains("-.")) {
+        throw new IllegalArgumentException(
+            "bucket name '" + name + "' cannot contain successive characters '..', '.-' and '-.'");
       }
     }
 
     private void validateRegion(String region) {
-      validateNullOrNotEmptyString(region, "region");
+      if (!skipValidation && region != null && !HttpUtils.REGION_REGEX.matcher(region).find()) {
+        throw new IllegalArgumentException("invalid region " + region);
+      }
     }
 
     @Override
@@ -71,6 +81,12 @@ public abstract class BucketArgs extends BaseArgs {
     public B bucket(String name) {
       validateBucketName(name);
       operations.add(args -> args.bucketName = name);
+      return (B) this;
+    }
+
+    @SuppressWarnings("unchecked") // Its safe to type cast to B as B extends this class.
+    public B skipValidation(boolean skipValidation) {
+      this.skipValidation = skipValidation;
       return (B) this;
     }
 
