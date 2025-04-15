@@ -17,8 +17,10 @@
 
 package io.minio.admin;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.type.CollectionType;
 import com.fasterxml.jackson.databind.type.MapType;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -101,7 +103,10 @@ public class MinioAdminClient {
 
   private static final long DEFAULT_CONNECTION_TIMEOUT = TimeUnit.MINUTES.toMillis(1);
   private static final MediaType DEFAULT_MEDIA_TYPE = MediaType.parse("application/octet-stream");
-  private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+  private static final ObjectMapper OBJECT_MAPPER =
+      JsonMapper.builder()
+          .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+          .build();
 
   private static final Pattern SERVICE_ACCOUNT_NAME_REGEX =
       Pattern.compile("^(?!-)(?!_)[a-z_\\d-]{1,31}(?<!-)(?<!_)$", Pattern.CASE_INSENSITIVE);
@@ -249,7 +254,7 @@ public class MinioAdminClient {
             Method.PUT,
             Command.ADD_USER,
             ImmutableMultimap.of("accessKey", accessKey),
-            Crypto.encrypt(creds.secretKey(), OBJECT_MAPPER.writeValueAsBytes(userInfo)))) {}
+            Crypto.encrypt(OBJECT_MAPPER.writeValueAsBytes(userInfo), creds.secretKey()))) {}
   }
 
   /**
@@ -285,7 +290,7 @@ public class MinioAdminClient {
           InvalidCipherTextException {
     try (Response response = execute(Method.GET, Command.LIST_USERS, null, null)) {
       Credentials creds = getCredentials();
-      byte[] jsonData = Crypto.decrypt(creds.secretKey(), response.body().bytes());
+      byte[] jsonData = Crypto.decrypt(response.body().byteStream(), creds.secretKey());
       MapType mapType =
           OBJECT_MAPPER
               .getTypeFactory()
@@ -657,7 +662,8 @@ public class MinioAdminClient {
     }
     if (name != null && !SERVICE_ACCOUNT_NAME_REGEX.matcher(name).find()) {
       throw new IllegalArgumentException(
-          "name must contain non-empty alphanumeric,  underscore and hyphen characters not longer than 32 characters");
+          "name must contain non-empty alphanumeric,  underscore and hyphen characters not longer"
+              + " than 32 characters");
     }
     if (description != null && description.length() > 256) {
       throw new IllegalArgumentException("description must be at most 256 characters long");
@@ -688,8 +694,8 @@ public class MinioAdminClient {
             Method.PUT,
             Command.ADD_SERVICE_ACCOUNT,
             null,
-            Crypto.encrypt(creds.secretKey(), OBJECT_MAPPER.writeValueAsBytes(serviceAccount)))) {
-      byte[] jsonData = Crypto.decrypt(creds.secretKey(), response.body().bytes());
+            Crypto.encrypt(OBJECT_MAPPER.writeValueAsBytes(serviceAccount), creds.secretKey()))) {
+      byte[] jsonData = Crypto.decrypt(response.body().byteStream(), creds.secretKey());
       return OBJECT_MAPPER.readValue(jsonData, AddServiceAccountResp.class).credentials();
     }
   }
@@ -724,7 +730,8 @@ public class MinioAdminClient {
     }
     if (newName != null && !SERVICE_ACCOUNT_NAME_REGEX.matcher(newName).find()) {
       throw new IllegalArgumentException(
-          "new name must contain non-empty alphanumeric,  underscore and hyphen characters not longer than 32 characters");
+          "new name must contain non-empty alphanumeric,  underscore and hyphen characters not"
+              + " longer than 32 characters");
     }
     if (newDescription != null && newDescription.length() > 256) {
       throw new IllegalArgumentException("new description must be at most 256 characters long");
@@ -754,7 +761,7 @@ public class MinioAdminClient {
             Method.POST,
             Command.UPDATE_SERVICE_ACCOUNT,
             ImmutableMultimap.of("accessKey", accessKey),
-            Crypto.encrypt(creds.secretKey(), OBJECT_MAPPER.writeValueAsBytes(serviceAccount)))) {}
+            Crypto.encrypt(OBJECT_MAPPER.writeValueAsBytes(serviceAccount), creds.secretKey()))) {}
   }
 
   /**
@@ -803,7 +810,7 @@ public class MinioAdminClient {
             ImmutableMultimap.of("user", username),
             null)) {
       Credentials creds = getCredentials();
-      byte[] jsonData = Crypto.decrypt(creds.secretKey(), response.body().bytes());
+      byte[] jsonData = Crypto.decrypt(response.body().byteStream(), creds.secretKey());
       return OBJECT_MAPPER.readValue(jsonData, ListServiceAccountResp.class);
     }
   }
@@ -831,7 +838,7 @@ public class MinioAdminClient {
             ImmutableMultimap.of("accessKey", accessKey),
             null)) {
       Credentials creds = getCredentials();
-      byte[] jsonData = Crypto.decrypt(creds.secretKey(), response.body().bytes());
+      byte[] jsonData = Crypto.decrypt(response.body().byteStream(), creds.secretKey());
       return OBJECT_MAPPER.readValue(jsonData, GetServiceAccountInfoResp.class);
     }
   }

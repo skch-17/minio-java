@@ -16,7 +16,7 @@
 
 package io.minio.messages;
 
-import java.util.Collections;
+import io.minio.Utils;
 import java.util.Map;
 import javax.annotation.Nullable;
 import org.simpleframework.xml.Element;
@@ -30,6 +30,12 @@ public class AndOperator {
   @Element(name = "Prefix", required = false)
   @Convert(PrefixConverter.class)
   private String prefix;
+
+  @Element(name = "ObjectSizeLessThan", required = false)
+  private Long objectSizeLessThan;
+
+  @Element(name = "ObjectSizeGreaterThan", required = false)
+  private Long objectSizeGreaterThan;
 
   @ElementMap(
       attribute = false,
@@ -64,11 +70,38 @@ public class AndOperator {
     }
 
     this.prefix = prefix;
-    this.tags = (tags != null) ? Collections.unmodifiableMap(tags) : null;
+    this.tags = Utils.unmodifiableMap(tags);
+  }
+
+  public AndOperator(
+      @Nullable @Element(name = "Prefix", required = false) String prefix,
+      @Nullable
+          @ElementMap(
+              attribute = false,
+              entry = "Tag",
+              inline = true,
+              key = "Key",
+              value = "Value",
+              required = false)
+          Map<String, String> tags,
+      @Nullable @Element(name = "ObjectSizeLessThan", required = false) Long objectSizeLessThan,
+      @Nullable @Element(name = "ObjectSizeGreaterThan", required = false)
+          Long objectSizeGreaterThan) {
+    this(prefix, tags);
+    this.objectSizeLessThan = objectSizeLessThan;
+    this.objectSizeGreaterThan = objectSizeGreaterThan;
   }
 
   public String prefix() {
     return this.prefix;
+  }
+
+  public Long objectSizeLessThan() {
+    return this.objectSizeLessThan;
+  }
+
+  public Long objectSizeGreaterThan() {
+    return this.objectSizeGreaterThan;
   }
 
   public Map<String, String> tags() {

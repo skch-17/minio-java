@@ -39,7 +39,7 @@ import io.minio.errors.XmlParserException;
 import io.minio.http.HttpUtils;
 import io.minio.http.Method;
 import io.minio.messages.CompleteMultipartUpload;
-import io.minio.messages.CompleteMultipartUploadOutput;
+import io.minio.messages.CompleteMultipartUploadResult;
 import io.minio.messages.CopyPartResult;
 import io.minio.messages.DeleteError;
 import io.minio.messages.DeleteMarker;
@@ -49,6 +49,7 @@ import io.minio.messages.DeleteResult;
 import io.minio.messages.ErrorResponse;
 import io.minio.messages.InitiateMultipartUploadResult;
 import io.minio.messages.Item;
+import io.minio.messages.ListAllMyBucketsResult;
 import io.minio.messages.ListBucketResultV1;
 import io.minio.messages.ListBucketResultV2;
 import io.minio.messages.ListMultipartUploadsResult;
@@ -69,6 +70,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.InvalidKeyException;
 import java.security.KeyManagementException;
 import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
 import java.time.LocalDateTime;
 import java.time.ZonedDateTime;
 import java.util.Arrays;
@@ -79,6 +81,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.Random;
 import java.util.Scanner;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -93,6 +96,7 @@ import okhttp3.Call;
 import okhttp3.Callback;
 import okhttp3.Headers;
 import okhttp3.HttpUrl;
+import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.RequestBody;
@@ -120,12 +124,18 @@ public abstract class S3Base implements AutoCloseable {
   protected static final int MAX_BUCKET_POLICY_SIZE = 20 * 1024;
   protected static final String US_EAST_1 = "us-east-1";
   protected final Map<String, String> regionCache = new ConcurrentHashMap<>();
+  protected static final Random random = new Random(new SecureRandom().nextLong());
+  protected static final ObjectMapper objectMapper =
+      JsonMapper.builder()
+          .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+          .configure(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES, true)
+          .build();
 
   private static final String RETRY_HEAD = "RetryHead";
   private static final String END_HTTP = "----------END-HTTP----------";
   private static final String UPLOAD_ID = "uploadId";
   private static final Set<String> TRACE_QUERY_PARAMS =
-      ImmutableSet.of("retention", "legal-hold", "tagging", UPLOAD_ID);
+      ImmutableSet.of("retention", "legal-hold", "tagging", UPLOAD_ID, "acl", "attributes");
   private PrintWriter traceStream;
   private String userAgent = MinioProperties.INSTANCE.getDefaultUserAgent();
 
@@ -482,6 +492,10 @@ public abstract class S3Base implements AutoCloseable {
     requestBuilder.header("Accept-Encoding", "identity");
     requestBuilder.header("User-Agent", this.userAgent);
 
+    if (body != null && body instanceof RequestBody) {
+      return requestBuilder.method(method.toString(), (RequestBody) body).build();
+    }
+
     String md5Hash = Digest.ZERO_MD5_HASH;
     if (body != null) {
       md5Hash = (body instanceof byte[]) ? Digest.md5Hash((byte[]) body, length) : null;
@@ -519,6 +533,11 @@ public abstract class S3Base implements AutoCloseable {
     RequestBody requestBody = null;
     if (body != null) {
       String contentType = (headers != null) ? headers.get("Content-Type") : null;
+      if (contentType != null && MediaType.parse(contentType) == null) {
+        throw new IllegalArgumentException(
+            "invalid content type '" + contentType + "' as per RFC 2045");
+      }
+
       if (body instanceof PartSource) {
         requestBody = new HttpRequestBody((PartSource) body, contentType);
       } else {
@@ -560,7 +579,8 @@ public abstract class S3Base implements AutoCloseable {
       throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
           NoSuchAlgorithmException, XmlParserException {
     boolean traceRequestBody = false;
-    if (body != null && !(body instanceof PartSource || body instanceof byte[])) {
+    if (body != null
+        && !(body instanceof PartSource || body instanceof byte[] || body instanceof RequestBody)) {
       byte[] bytes;
       if (body instanceof CharSequence) {
         bytes = body.toString().getBytes(StandardCharsets.UTF_8);
@@ -579,8 +599,8 @@ public abstract class S3Base implements AutoCloseable {
 
     HttpUrl url = buildUrl(method, bucketName, objectName, region, queryParamMap);
     Credentials creds = (provider == null) ? null : provider.fetch();
-    Request req = createRequest(url, method, headers, body, length, creds, ZonedDateTime.now());
-    if (creds != null) {
+      Request req = createRequest(url, method, headers, body, length, creds, ZonedDateTime.now());
+    if (!(body != null && body instanceof RequestBody) && creds != null) {
       req =
           Signer.signV4S3(
               req,
@@ -616,6 +636,14 @@ public abstract class S3Base implements AutoCloseable {
 
               @Override
               public void onResponse(Call call, final Response response) throws IOException {
+                try {
+                  onResponse(response);
+                } catch (Exception e) {
+                  completableFuture.completeExceptionally(e);
+                }
+              }
+
+              private void onResponse(final Response response) throws IOException {
                 String trace =
                     response.protocol().toString().toUpperCase(Locale.US)
                         + " "
@@ -790,21 +818,34 @@ public abstract class S3Base implements AutoCloseable {
       int length)
       throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
           NoSuchAlgorithmException, XmlParserException {
+    final Multimap<String, String> extraHeaders;
+    final Multimap<String, String> extraQueryParams;
     final String bucketName;
     final String region;
     final String objectName;
 
-    if (args instanceof BucketArgs) {
-      bucketName = ((BucketArgs) args).bucket();
-      region = ((BucketArgs) args).region();
+    if (args != null) {
+      extraHeaders = args.extraHeaders();
+      extraQueryParams = args.extraQueryParams();
+
+      if (args instanceof BucketArgs) {
+        bucketName = ((BucketArgs) args).bucket();
+        region = ((BucketArgs) args).region();
+      } else {
+        bucketName = null;
+        region = null;
+      }
+
+      if (args instanceof ObjectArgs) {
+        objectName = ((ObjectArgs) args).object();
+      } else {
+        objectName = null;
+      }
     } else {
+      extraHeaders = null;
+      extraQueryParams = null;
       bucketName = null;
       region = null;
-    }
-
-    if (args instanceof ObjectArgs) {
-      objectName = ((ObjectArgs) args).object();
-    } else {
       objectName = null;
     }
 
@@ -817,8 +858,8 @@ public abstract class S3Base implements AutoCloseable {
                     bucketName,
                     objectName,
                     location,
-                    httpHeaders(merge(args.extraHeaders(), headers)),
-                    merge(args.extraQueryParams(), queryParams),
+                    httpHeaders(merge(extraHeaders, headers)),
+                    merge(extraQueryParams, queryParams),
                     body,
                     length);
               } catch (InsufficientDataException
@@ -1461,22 +1502,31 @@ public abstract class S3Base implements AutoCloseable {
             this.itemIterator = null;
             this.prefixIterator = null;
 
-            ListObjectsV2Response response =
-                listObjectsV2(
-                    args.bucket(),
-                    args.region(),
-                    args.delimiter(),
-                    args.useUrlEncodingType() ? "url" : null,
-                    args.startAfter(),
-                    args.maxKeys(),
-                    args.prefix(),
-                    (result == null) ? args.continuationToken() : result.nextContinuationToken(),
-                    args.fetchOwner(),
-                    args.includeUserMetadata(),
-                    args.extraHeaders(),
-                    args.extraQueryParams());
-            result = response.result();
-            this.listObjectsResult = response.result();
+            try {
+              ListObjectsV2Response response =
+                  listObjectsV2Async(
+                          args.bucket(),
+                          args.region(),
+                          args.delimiter(),
+                          args.useUrlEncodingType() ? "url" : null,
+                          args.startAfter(),
+                          args.maxKeys(),
+                          args.prefix(),
+                          (result == null)
+                              ? args.continuationToken()
+                              : result.nextContinuationToken(),
+                          args.fetchOwner(),
+                          args.includeUserMetadata(),
+                          args.extraHeaders(),
+                          args.extraQueryParams())
+                      .get();
+              result = response.result();
+              this.listObjectsResult = response.result();
+            } catch (InterruptedException e) {
+              throw new RuntimeException(e);
+            } catch (ExecutionException e) {
+              throwEncapsulatedException(e);
+            }
           }
         };
       }
@@ -1503,19 +1553,26 @@ public abstract class S3Base implements AutoCloseable {
             String nextMarker = (result == null) ? args.marker() : result.nextMarker();
             if (nextMarker == null) nextMarker = this.lastObjectName;
 
-            ListObjectsV1Response response =
-                listObjectsV1(
-                    args.bucket(),
-                    args.region(),
-                    args.delimiter(),
-                    args.useUrlEncodingType() ? "url" : null,
-                    nextMarker,
-                    args.maxKeys(),
-                    args.prefix(),
-                    args.extraHeaders(),
-                    args.extraQueryParams());
-            result = response.result();
-            this.listObjectsResult = response.result();
+            try {
+              ListObjectsV1Response response =
+                  listObjectsV1Async(
+                          args.bucket(),
+                          args.region(),
+                          args.delimiter(),
+                          args.useUrlEncodingType() ? "url" : null,
+                          nextMarker,
+                          args.maxKeys(),
+                          args.prefix(),
+                          args.extraHeaders(),
+                          args.extraQueryParams())
+                      .get();
+              result = response.result();
+              this.listObjectsResult = response.result();
+            } catch (InterruptedException e) {
+              throw new RuntimeException(e);
+            } catch (ExecutionException e) {
+              throwEncapsulatedException(e);
+            }
           }
         };
       }
@@ -1539,20 +1596,27 @@ public abstract class S3Base implements AutoCloseable {
             this.itemIterator = null;
             this.prefixIterator = null;
 
-            ListObjectVersionsResponse response =
-                listObjectVersions(
-                    args.bucket(),
-                    args.region(),
-                    args.delimiter(),
-                    args.useUrlEncodingType() ? "url" : null,
-                    (result == null) ? args.keyMarker() : result.nextKeyMarker(),
-                    args.maxKeys(),
-                    args.prefix(),
-                    (result == null) ? args.versionIdMarker() : result.nextVersionIdMarker(),
-                    args.extraHeaders(),
-                    args.extraQueryParams());
-            result = response.result();
-            this.listObjectsResult = response.result();
+            try {
+              ListObjectVersionsResponse response =
+                  listObjectVersionsAsync(
+                          args.bucket(),
+                          args.region(),
+                          args.delimiter(),
+                          args.useUrlEncodingType() ? "url" : null,
+                          (result == null) ? args.keyMarker() : result.nextKeyMarker(),
+                          args.maxKeys(),
+                          args.prefix(),
+                          (result == null) ? args.versionIdMarker() : result.nextVersionIdMarker(),
+                          args.extraHeaders(),
+                          args.extraQueryParams())
+                      .get();
+              result = response.result();
+              this.listObjectsResult = response.result();
+            } catch (InterruptedException e) {
+              throw new RuntimeException(e);
+            } catch (ExecutionException e) {
+              throwEncapsulatedException(e);
+            }
           }
         };
       }
@@ -1813,7 +1877,7 @@ public abstract class S3Base implements AutoCloseable {
     this.awsS3Prefix = awsS3Prefix;
   }
 
-  /** Execute stat object asynchronously. */
+  /** Execute stat object a.k.a head object S3 API asynchronously. */
   protected CompletableFuture<StatObjectResponse> statObjectAsync(StatObjectArgs args)
       throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
           NoSuchAlgorithmException, XmlParserException {
@@ -1848,7 +1912,7 @@ public abstract class S3Base implements AutoCloseable {
    * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
    * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  protected CompletableFuture<AbortMultipartUploadResponse> abortMultipartUploadAsync(
+  public CompletableFuture<AbortMultipartUploadResponse> abortMultipartUploadAsync(
       String bucketName,
       String region,
       String objectName,
@@ -1956,7 +2020,7 @@ public abstract class S3Base implements AutoCloseable {
    * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
    * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  protected CompletableFuture<ObjectWriteResponse> completeMultipartUploadAsync(
+  public CompletableFuture<ObjectWriteResponse> completeMultipartUploadAsync(
       String bucketName,
       String region,
       String objectName,
@@ -2008,15 +2072,16 @@ public abstract class S3Base implements AutoCloseable {
                   }
 
                   try {
-                    CompleteMultipartUploadOutput result =
-                        Xml.unmarshal(CompleteMultipartUploadOutput.class, bodyContent);
+                    CompleteMultipartUploadResult result =
+                        Xml.unmarshal(CompleteMultipartUploadResult.class, bodyContent);
                     return new ObjectWriteResponse(
                         response.headers(),
                         result.bucket(),
                         result.location(),
                         result.object(),
                         result.etag(),
-                        response.header("x-amz-version-id"));
+                        response.header("x-amz-version-id"),
+                        result);
                   } catch (XmlParserException e) {
                     // As this CompleteMultipartUpload REST call succeeded, just log it.
                     Logger.getLogger(S3Base.class.getName())
@@ -2107,7 +2172,7 @@ public abstract class S3Base implements AutoCloseable {
    * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
    * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  protected CompletableFuture<CreateMultipartUploadResponse> createMultipartUploadAsync(
+  public CompletableFuture<CreateMultipartUploadResponse> createMultipartUploadAsync(
       String bucketName,
       String region,
       String objectName,
@@ -2350,8 +2415,8 @@ public abstract class S3Base implements AutoCloseable {
   }
 
   /**
-   * Do <a href="https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjects.html">ListObjects
-   * version 1 S3 API</a> asynchronously.
+   * Do <a href="https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html">ListObjects
+   * version 2 S3 API</a> asynchronously.
    *
    * @param bucketName Name of the bucket.
    * @param region Region of the bucket (Optional).
@@ -2850,14 +2915,14 @@ public abstract class S3Base implements AutoCloseable {
               | XmlParserException
               | InterruptedException
               | ExecutionException e) {
+            Throwable throwable = e;
+            if (throwable instanceof ExecutionException) {
+              throwable = ((ExecutionException) throwable).getCause();
+            }
+            if (throwable instanceof CompletionException) {
+              throwable = ((CompletionException) throwable).getCause();
+            }
             if (uploadId == null) {
-              Throwable throwable = e;
-              if (throwable instanceof ExecutionException) {
-                throwable = ((ExecutionException) throwable).getCause();
-              }
-              if (throwable instanceof CompletionException) {
-                throwable = ((CompletionException) throwable).getCause();
-              }
               throw new CompletionException(throwable);
             }
             try {
@@ -2872,15 +2937,15 @@ public abstract class S3Base implements AutoCloseable {
                 | XmlParserException
                 | InterruptedException
                 | ExecutionException ex) {
-              Throwable throwable = ex;
+              throwable = ex;
               if (throwable instanceof ExecutionException) {
                 throwable = ((ExecutionException) throwable).getCause();
               }
               if (throwable instanceof CompletionException) {
                 throwable = ((CompletionException) throwable).getCause();
               }
-              throw new CompletionException(throwable);
             }
+            throw new CompletionException(throwable);
           }
           return response;
         });
@@ -3169,7 +3234,7 @@ public abstract class S3Base implements AutoCloseable {
    * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
    * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  protected CompletableFuture<ListMultipartUploadsResponse> listMultipartUploadsAsync(
+  public CompletableFuture<ListMultipartUploadsResponse> listMultipartUploadsAsync(
       String bucketName,
       String region,
       String delimiter,
@@ -3318,7 +3383,7 @@ public abstract class S3Base implements AutoCloseable {
    * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
    * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  protected CompletableFuture<ListPartsResponse> listPartsAsync(
+  public CompletableFuture<ListPartsResponse> listPartsAsync(
       String bucketName,
       String region,
       String objectName,
@@ -3454,7 +3519,7 @@ public abstract class S3Base implements AutoCloseable {
    * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
    * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  protected CompletableFuture<UploadPartResponse> uploadPartAsync(
+  public CompletableFuture<UploadPartResponse> uploadPartAsync(
       String bucketName,
       String region,
       String objectName,
@@ -3528,7 +3593,7 @@ public abstract class S3Base implements AutoCloseable {
    * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
    * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  protected CompletableFuture<UploadPartResponse> uploadPartAsync(
+  public CompletableFuture<UploadPartResponse> uploadPartAsync(
       String bucketName,
       String region,
       String objectName,
@@ -3731,7 +3796,7 @@ public abstract class S3Base implements AutoCloseable {
    * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
    * @throws XmlParserException thrown to indicate XML parsing error.
    */
-  protected CompletableFuture<UploadPartCopyResponse> uploadPartCopyAsync(
+  public CompletableFuture<UploadPartCopyResponse> uploadPartCopyAsync(
       String bucketName,
       String region,
       String objectName,
@@ -3779,6 +3844,54 @@ public abstract class S3Base implements AutoCloseable {
                     uploadId,
                     partNumber,
                     result);
+              } catch (XmlParserException e) {
+                throw new CompletionException(e);
+              } finally {
+                response.close();
+              }
+            });
+  }
+
+  /**
+   * Do <a href="https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListBuckets.html">ListBuckets
+   * S3 API</a>.
+   *
+   * @param bucketRegion Fetch buckets from the region (Optional).
+   * @param maxBuckets Maximum buckets to be fetched (Optional).
+   * @param prefix Bucket name prefix (Optional).
+   * @param continuationToken continuation token (Optional).
+   * @param extraHeaders Extra headers for request (Optional).
+   * @param extraQueryParams Extra query parameters for request (Optional).
+   * @return {@link CompletableFuture}&lt;{@link ListBucketsResponse}&gt; object.
+   * @throws InsufficientDataException thrown to indicate not enough data available in InputStream.
+   * @throws InternalException thrown to indicate internal library error.
+   * @throws InvalidKeyException thrown to indicate missing of HMAC SHA-256 library.
+   * @throws IOException thrown to indicate I/O error on S3 operation.
+   * @throws NoSuchAlgorithmException thrown to indicate missing of MD5 or SHA-256 digest library.
+   * @throws XmlParserException thrown to indicate XML parsing error.
+   */
+  protected CompletableFuture<ListBucketsResponse> listBucketsAsync(
+      String bucketRegion,
+      Integer maxBuckets,
+      String prefix,
+      String continuationToken,
+      Multimap<String, String> extraHeaders,
+      Multimap<String, String> extraQueryParams)
+      throws InsufficientDataException, InternalException, InvalidKeyException, IOException,
+          NoSuchAlgorithmException, XmlParserException {
+    Multimap<String, String> queryParams = newMultimap(extraQueryParams);
+    if (bucketRegion != null) queryParams.put("bucket-region", bucketRegion);
+    if (maxBuckets != null)
+      queryParams.put("max-buckets", Integer.toString(maxBuckets > 0 ? maxBuckets : 10000));
+    if (prefix != null) queryParams.put("prefix", prefix);
+    if (continuationToken != null) queryParams.put("continuation-token", continuationToken);
+    return executeGetAsync(null, extraHeaders, queryParams)
+        .thenApply(
+            response -> {
+              try {
+                ListAllMyBucketsResult result =
+                    Xml.unmarshal(ListAllMyBucketsResult.class, response.body().charStream());
+                return new ListBucketsResponse(response.headers(), result);
               } catch (XmlParserException e) {
                 throw new CompletionException(e);
               } finally {
