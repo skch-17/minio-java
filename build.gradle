@@ -319,10 +319,6 @@ project(':adminapi') {
     }
 
     signing {
-        if (project.properties.containsKey('signing.keyId')) {
-            sign publishing.publications.mavenJava
-        }
-    }
         setRequired {
             gradle.taskGraph.allTasks.any { it.name.contains('LocalMavenWithChecksumsRepository') }
             sign publishing.publications.minioJava
